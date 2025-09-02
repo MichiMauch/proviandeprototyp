@@ -15,6 +15,7 @@ import numpy as np
 import os
 from dotenv import load_dotenv
 import openai
+import time
 
 # Erhöhe CSV Field Size Limit für große Felder
 csv.field_size_limit(sys.maxsize)
@@ -86,13 +87,14 @@ NEGATIVE_KEYWORDS = {
     'hilfe', 'klappt nicht', 'funktioniert nicht', 'geht nicht', 'verstehe nicht'
 }
 
-def classify_message_with_ai(message_text, role):
-    """Klassifiziert eine Nachricht mit OpenAI API"""
+def classify_message_with_ai(message_text, role, max_retries=3):
+    """Klassifiziert eine Nachricht mit OpenAI API mit Retry-Logik für Rate Limits"""
     if not use_openai:
         return classify_message_rule_based(message_text, role)
     
-    try:
-        prompt = f"""Du bist ein Analysesystem. Klassifiziere diese Nachricht:
+    for attempt in range(max_retries):
+        try:
+            prompt = f"""Du bist ein Analysesystem. Klassifiziere diese Nachricht:
 
 Nachricht: {message_text}
 Rolle: {role}
@@ -114,35 +116,58 @@ Sentiment:
 - negativ: Kritik, Beschwerden, Probleme, Unzufriedenheit
 - neutral: Sachliche, emotionslose Nachrichten"""
 
-        response = client.chat.completions.create(
-            model=openai_model,
-            messages=[{"role": "system", "content": prompt}],
-            temperature=openai_temperature,
-            max_tokens=openai_max_tokens
-        )
-        
-        # Parse JSON aus der Antwort
-        response_text = response.choices[0].message.content
-        # Versuche JSON zu extrahieren, auch wenn Text drumherum ist
-        import re
-        json_match = re.search(r'\{[^{}]*\}', response_text)
-        if json_match:
-            result = json.loads(json_match.group())
-        else:
-            # Fallback auf manuelle Extraktion
-            result = {"kategorie": "anderes", "sentiment": "neutral"}
-        return {
-            "frage": message_text,
-            "rolle": role,
-            "kategorie": result.get("kategorie", "anderes"),
-            "sentiment": result.get("sentiment", "neutral")
-        }
-    except Exception as e:
-        # Zeige Fehler nur einmal in der Seitenleiste
-        if 'openai_error_shown' not in st.session_state:
-            st.session_state.openai_error_shown = True
-            st.sidebar.warning(f"OpenAI API Fehler: {str(e)[:100]}... Nutze regelbasierte Klassifizierung.")
-        return classify_message_rule_based(message_text, role)
+            response = client.chat.completions.create(
+                model=openai_model,
+                messages=[{"role": "system", "content": prompt}],
+                temperature=openai_temperature,
+                max_tokens=openai_max_tokens
+            )
+            
+            # Parse JSON aus der Antwort
+            response_text = response.choices[0].message.content
+            # Versuche JSON zu extrahieren, auch wenn Text drumherum ist
+            import re
+            json_match = re.search(r'\{[^{}]*\}', response_text)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                # Fallback auf manuelle Extraktion
+                result = {"kategorie": "anderes", "sentiment": "neutral"}
+            return {
+                "frage": message_text,
+                "rolle": role,
+                "kategorie": result.get("kategorie", "anderes"),
+                "sentiment": result.get("sentiment", "neutral")
+            }
+            
+        except Exception as e:
+            error_str = str(e)
+            
+            # Rate Limit Behandlung (429 Error)
+            if "429" in error_str or "rate limit" in error_str.lower():
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 2 ** attempt
+                    if 'rate_limit_info' not in st.session_state:
+                        st.session_state.rate_limit_info = True
+                        st.info(f"⏳ Rate Limit erreicht. Warte {wait_time}s und versuche erneut... (Versuch {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # Nach allen Versuchen: Zeige Warnung und nutze Fallback
+                    if 'rate_limit_final' not in st.session_state:
+                        st.session_state.rate_limit_final = True
+                        st.warning("⚠️ GPT-4 Rate Limit erreicht. Nutze regelbasierte Klassifizierung als Fallback.")
+                    return classify_message_rule_based(message_text, role)
+            else:
+                # Andere Fehler: Zeige Warnung und nutze Fallback
+                if 'openai_error_shown' not in st.session_state:
+                    st.session_state.openai_error_shown = True
+                    st.sidebar.error(f"OpenAI API Fehler: {error_str[:100]}... Nutze regelbasierte Klassifizierung.")
+                return classify_message_rule_based(message_text, role)
+    
+    # Fallback falls alle Versuche fehlschlagen
+    return classify_message_rule_based(message_text, role)
 
 def classify_message_rule_based(message_text, role):
     """Regelbasierte Klassifizierung als Fallback"""
@@ -686,6 +711,7 @@ else:
         # OpenAI Status Anzeige
         if use_openai:
             st.success(f"✅ OpenAI API aktiv (Modell: {openai_model})")
+            st.info("💡 **Tipp**: Bei Rate Limits wird automatisch 3x mit exponential backoff retry versucht, danach Fallback auf regelbasierte Klassifizierung.")
         else:
             st.info("ℹ️ Regelbasierte Klassifizierung aktiv. Füge deinen OpenAI API Key in .env.local hinzu für KI-basierte Analyse.")
         

@@ -711,7 +711,6 @@ else:
         # OpenAI Status Anzeige
         if use_openai:
             st.success(f"✅ OpenAI API aktiv (Modell: {openai_model})")
-            st.info("💡 **Tipp**: Bei Rate Limits wird automatisch 3x mit exponential backoff retry versucht, danach Fallback auf regelbasierte Klassifizierung.")
         else:
             st.info("ℹ️ Regelbasierte Klassifizierung aktiv. Füge deinen OpenAI API Key in .env.local hinzu für KI-basierte Analyse.")
         
